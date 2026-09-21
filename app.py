@@ -17,31 +17,6 @@ st.set_page_config(page_title="RAG Search with Groq & FAISS", page_icon="⚡", l
 
 st.title("⚡ Multi-Format RAG App: PDF, DOCX, TXT, MD & GDrive")
 
-# Sidebar: API Keys & Model Selection
-with st.sidebar:
-    st.header("🔑 Configuration")
-    
-    # Check if key exists in Secrets
-    secret_key = st.secrets.get("GROQ_API_KEY", "")
-    if secret_key:
-        st.success("✅ Groq API Key loaded from Secrets!")
-        groq_api_key = secret_key
-    else:
-        groq_api_key = st.text_input(
-            "Groq API Key", 
-            type="password",
-            help="Get your key at https://console.groq.com"
-        )
-    
-    selected_model = st.selectbox(
-        "Choose Groq Model",
-        options=["openai/gpt-oss-120b", "qwen/qwen3.6-27b"],
-        index=0
-    )
-    
-    st.divider()
-    st.markdown("### Processed Documents")
-
 # Cache ML Models
 @st.cache_resource
 def load_embedding_model():
@@ -135,7 +110,6 @@ def extract_text_from_file(file_obj, filename: str) -> str:
     return extracted_text
 
 def download_and_extract_gdrive(gdrive_url: str) -> str:
-    # Handle Google Docs, Slides, Sheets exports
     if "docs.google.com/presentation" in gdrive_url:
         file_id = re.search(r'/d/([a-zA-Z0-9-_]+)', gdrive_url).group(1)
         export_url = f"https://docs.google.com/presentation/d/{file_id}/export/pdf"
@@ -157,7 +131,6 @@ def download_and_extract_gdrive(gdrive_url: str) -> str:
         os.remove(temp_pdf.name)
         return text
     else:
-        # Direct file download using gdown
         match = re.search(r'[-_a-zA-Z0-9]{25,}', gdrive_url)
         file_id = match.group(0) if match else gdrive_url
         download_url = f'https://drive.google.com/uc?id={file_id}'
@@ -179,54 +152,84 @@ def rerank_chunks(query: str, retrieved_chunks: list, top_n: int = 3) -> list:
     scored_chunks.sort(key=lambda x: x[1], reverse=True)
     return [chunk for chunk, score in scored_chunks[:top_n]]
 
-# UI Layout: Ingestion
-st.subheader("1. Document Ingestion")
-col1, col2 = st.columns(2)
-
-with col1:
-    uploaded_file = st.file_uploader("Upload Document (PDF, TXT, DOCX, MD)", type=["pdf", "txt", "docx", "md"])
-    if uploaded_file and st.button("Process Document"):
-        with st.spinner("Extracting text & building vectors..."):
-            text = extract_text_from_file(uploaded_file, uploaded_file.name)
-            num_chunks = st.session_state.vector_store.add_text(text, source_name=uploaded_file.name)
-            st.session_state.indexed_sources.append(f"📄 {uploaded_file.name} ({num_chunks} chunks)")
-            st.success(f"Successfully processed {uploaded_file.name}!")
-
-with col2:
-    gdrive_link = st.text_input("Or enter Google Drive / Docs / Slides Link:")
-    if gdrive_link and st.button("Download & Process GDrive Link"):
-        with st.spinner("Downloading from Google Drive & indexing..."):
-            try:
-                text = download_and_extract_gdrive(gdrive_link)
-                num_chunks = st.session_state.vector_store.add_text(text, source_name="GDrive_Doc")
-                st.session_state.indexed_sources.append(f"☁️ Google Drive File ({num_chunks} chunks)")
-                st.success("Successfully processed Google Drive file!")
-            except Exception as e:
-                st.error(f"Error processing GDrive link: {e}")
-
-# Sidebar Status
+# ==========================================
+# SIDEBAR UI (Organized Sections)
+# ==========================================
 with st.sidebar:
+    st.header("⚙️ App Controls")
+    
+    # Section 1: Configuration
+    with st.expander("🔑 1. Groq Configuration", expanded=True):
+        secret_key = st.secrets.get("GROQ_API_KEY", "")
+        if secret_key:
+            st.success("✅ API Key loaded from Secrets")
+            groq_api_key = secret_key
+        else:
+            groq_api_key = st.text_input(
+                "Groq API Key", 
+                type="password",
+                help="Get key at https://console.groq.com"
+            )
+        
+        selected_model = st.selectbox(
+            "Select Groq Model",
+            options=["openai/gpt-oss-120b", "qwen/qwen3.6-27b"],
+            index=0
+        )
+
+    # Section 2: Google Drive Ingestion
+    with st.expander("☁️ 2. Google Drive / Docs Link", expanded=True):
+        gdrive_link = st.text_input("Paste Link / File ID:", placeholder="https://drive.google.com/...")
+        if st.button("Process Drive Link", use_container_width=True):
+            if not gdrive_link.strip():
+                st.warning("Please paste a link first.")
+            else:
+                with st.spinner("Downloading & indexing..."):
+                    try:
+                        text = download_and_extract_gdrive(gdrive_link)
+                        num_chunks = st.session_state.vector_store.add_text(text, source_name="GDrive_Link")
+                        st.session_state.indexed_sources.append(f"☁️ GDrive File ({num_chunks} chunks)")
+                        st.success("Google Drive content indexed!")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    # Section 3: Document File Upload
+    with st.expander("📁 3. Upload Files (PDF, DOCX, TXT, MD)", expanded=True):
+        uploaded_file = st.file_uploader(
+            "Choose a file", 
+            type=["pdf", "docx", "txt", "md"]
+        )
+        if uploaded_file and st.button("Process Local File", use_container_width=True):
+            with st.spinner("Processing file..."):
+                text = extract_text_from_file(uploaded_file, uploaded_file.name)
+                num_chunks = st.session_state.vector_store.add_text(text, source_name=uploaded_file.name)
+                st.session_state.indexed_sources.append(f"📄 {uploaded_file.name} ({num_chunks} chunks)")
+                st.success(f"Processed {uploaded_file.name}!")
+
+    # Section 4: Indexed Documents List
+    st.divider()
+    st.subheader("📑 Processed Documents")
     if st.session_state.indexed_sources:
         for src in st.session_state.indexed_sources:
             st.write(src)
     else:
-        st.info("No documents indexed yet.")
+        st.info("No documents added yet.")
 
-st.divider()
+# ==========================================
+# MAIN SCREEN UI
+# ==========================================
+st.subheader("💬 Ask Questions")
+user_query = st.text_input("Enter your question based on all ingested documents:", placeholder="e.g., What are the key points in the document?")
 
-# UI Layout: Query
-st.subheader("2. Ask Questions")
-user_query = st.text_input("Enter your question:")
-
-if st.button("Search & Answer", type="primary"):
+if st.button("Search & Get Answer", type="primary"):
     if not groq_api_key:
-        st.error("Please provide a Groq API key.")
+        st.error("Please provide a Groq API key in the sidebar.")
     elif st.session_state.vector_store.index.ntotal == 0:
-        st.warning("Please index at least one document first.")
+        st.warning("Please process at least one document or Google Drive link first.")
     elif not user_query.strip():
-        st.warning("Please enter a valid question.")
+        st.warning("Please enter a question.")
     else:
-        with st.spinner("Searching, Reranking & Fetching Answer from Groq..."):
+        with st.spinner("Searching vectors, reranking & generating answer with Groq..."):
             candidates = st.session_state.vector_store.similarity_search(user_query, k=10)
             reranked_chunks = rerank_chunks(user_query, candidates, top_n=3)
             
@@ -235,7 +238,7 @@ if st.button("Search & Answer", type="primary"):
                 context_str += f"\n[Document {idx} | Source: {c['metadata']['source']} | Tokens: {c['metadata']['token_count']}]\n{c['text']}\n"
             
             client = Groq(api_key=groq_api_key)
-            system_prompt = "You are a helpful assistant. Use ONLY the provided context to answer the question."
+            system_prompt = "You are a helpful assistant. Use ONLY the provided context to answer the user's question."
             user_prompt = f"Context:\n{context_str}\n\nQuestion: {user_query}\nAnswer:"
             
             try:
@@ -248,14 +251,14 @@ if st.button("Search & Answer", type="primary"):
                     temperature=0.1
                 )
                 
-                st.markdown("### Answer")
+                st.markdown("### 💡 Answer")
                 st.write(response.choices[0].message.content)
                 
-                with st.expander("🔍 View Top Reranked Chunks"):
+                with st.expander("🔍 View Top Reranked Context Chunks"):
                     for i, chunk in enumerate(reranked_chunks, 1):
                         st.markdown(f"**Chunk {i}** | Source: `{chunk['metadata']['source']}` | Tokens: `{chunk['metadata']['token_count']}`")
                         st.text(chunk["text"])
                         st.divider()
             except Exception as e:
                 st.error(f"Groq API Error: {e}")
-            
+                            
