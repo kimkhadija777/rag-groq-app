@@ -1,9 +1,11 @@
 import os
 import re
 import tempfile
+import requests
 import streamlit as st
 import gdown
 from pypdf import PdfReader
+import docx
 import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer, CrossEncoder
@@ -13,19 +15,23 @@ from groq import Groq
 # Page Configuration
 st.set_page_config(page_title="RAG Search with Groq & FAISS", page_icon="⚡", layout="wide")
 
-st.title("⚡ RAG App: PDF & GDrive Search with Groq LLMs")
+st.title("⚡ Multi-Format RAG App: PDF, DOCX, TXT, MD & GDrive")
 
 # Sidebar: API Keys & Model Selection
 with st.sidebar:
     st.header("🔑 Configuration")
     
-    # Retrieve key from Streamlit Secrets or user input
-    groq_api_key = st.text_input(
-        "Groq API Key", 
-        value=st.secrets.get("GROQ_API_KEY", ""), 
-        type="password",
-        help="Get your key at https://console.groq.com"
-    )
+    # Check if key exists in Secrets
+    secret_key = st.secrets.get("GROQ_API_KEY", "")
+    if secret_key:
+        st.success("✅ Groq API Key loaded from Secrets!")
+        groq_api_key = secret_key
+    else:
+        groq_api_key = st.text_input(
+            "Groq API Key", 
+            type="password",
+            help="Get your key at https://console.groq.com"
+        )
     
     selected_model = st.selectbox(
         "Choose Groq Model",
@@ -36,7 +42,7 @@ with st.sidebar:
     st.divider()
     st.markdown("### Processed Documents")
 
-# Cache ML Models in Streamlit Session State so they load only once
+# Cache ML Models
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
@@ -48,7 +54,7 @@ def load_reranker_model():
 embedding_model = load_embedding_model()
 reranker_model = load_reranker_model()
 
-# FAISS Vector Store Class
+# Vector Store Class
 class FAISSVectorStore:
     def __init__(self, model):
         self.model = model
@@ -57,6 +63,8 @@ class FAISSVectorStore:
         self.chunks_data = []
 
     def add_text(self, text: str, source_name: str, chunk_size: int = 500, chunk_overlap: int = 100):
+        if not text.strip():
+            return 0
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -97,37 +105,70 @@ class FAISSVectorStore:
                 results.append(self.chunks_data[idx])
         return results
 
-# Initialize persistent FAISS Vector Store in Session State
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = FAISSVectorStore(embedding_model)
 
 if "indexed_sources" not in st.session_state:
     st.session_state.indexed_sources = []
 
-# Helper Functions for Document Processing
-def extract_text_from_pdf(pdf_file) -> str:
-    reader = PdfReader(pdf_file)
+# File Text Extractors
+def extract_text_from_file(file_obj, filename: str) -> str:
+    ext = filename.split('.')[-1].lower()
     extracted_text = ""
-    for page_num, page in enumerate(reader.pages):
-        text = page.extract_text()
-        if text:
-            extracted_text += f"\n--- Page {page_num + 1} ---\n" + text
+    
+    if ext == "pdf":
+        reader = PdfReader(file_obj)
+        for page_num, page in enumerate(reader.pages):
+            text = page.extract_text()
+            if text:
+                extracted_text += f"\n--- Page {page_num + 1} ---\n" + text
+    elif ext == "docx":
+        doc = docx.Document(file_obj)
+        extracted_text = "\n".join([p.text for p in doc.paragraphs if p.text])
+    elif ext in ["txt", "md"]:
+        if isinstance(file_obj, str):
+            with open(file_obj, "r", encoding="utf-8") as f:
+                extracted_text = f.read()
+        else:
+            extracted_text = file_obj.read().decode("utf-8")
+            
     return extracted_text
 
-def download_and_extract_gdrive(gdrive_url_or_id: str) -> str:
-    match = re.search(r'[-_a-zA-Z0-9]{25,}', gdrive_url_or_id)
-    file_id = match.group(0) if match else gdrive_url_or_id
-    
-    download_url = f'https://drive.google.com/uc?id={file_id}'
-    temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    
-    try:
-        gdown.download(download_url, temp_pdf.name, quiet=True)
-        extracted_text = extract_text_from_pdf(temp_pdf.name)
-        return extracted_text
-    finally:
-        if os.path.exists(temp_pdf.name):
-            os.remove(temp_pdf.name)
+def download_and_extract_gdrive(gdrive_url: str) -> str:
+    # Handle Google Docs, Slides, Sheets exports
+    if "docs.google.com/presentation" in gdrive_url:
+        file_id = re.search(r'/d/([a-zA-Z0-9-_]+)', gdrive_url).group(1)
+        export_url = f"https://docs.google.com/presentation/d/{file_id}/export/pdf"
+        res = requests.get(export_url)
+        temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        temp_pdf.write(res.content)
+        temp_pdf.close()
+        text = extract_text_from_file(temp_pdf.name, "doc.pdf")
+        os.remove(temp_pdf.name)
+        return text
+    elif "docs.google.com/document" in gdrive_url:
+        file_id = re.search(r'/d/([a-zA-Z0-9-_]+)', gdrive_url).group(1)
+        export_url = f"https://docs.google.com/document/d/{file_id}/export?format=pdf"
+        res = requests.get(export_url)
+        temp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        temp_pdf.write(res.content)
+        temp_pdf.close()
+        text = extract_text_from_file(temp_pdf.name, "doc.pdf")
+        os.remove(temp_pdf.name)
+        return text
+    else:
+        # Direct file download using gdown
+        match = re.search(r'[-_a-zA-Z0-9]{25,}', gdrive_url)
+        file_id = match.group(0) if match else gdrive_url
+        download_url = f'https://drive.google.com/uc?id={file_id}'
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        try:
+            gdown.download(download_url, temp_file.name, quiet=True)
+            text = extract_text_from_file(temp_file.name, "gdrive_doc.pdf")
+            return text
+        finally:
+            if os.path.exists(temp_file.name):
+                os.remove(temp_file.name)
 
 def rerank_chunks(query: str, retrieved_chunks: list, top_n: int = 3) -> list:
     if not retrieved_chunks:
@@ -138,32 +179,32 @@ def rerank_chunks(query: str, retrieved_chunks: list, top_n: int = 3) -> list:
     scored_chunks.sort(key=lambda x: x[1], reverse=True)
     return [chunk for chunk, score in scored_chunks[:top_n]]
 
-# UI Layout: File Ingestion
+# UI Layout: Ingestion
 st.subheader("1. Document Ingestion")
 col1, col2 = st.columns(2)
 
 with col1:
-    uploaded_file = st.file_uploader("Upload a PDF Document", type=["pdf"])
-    if uploaded_file and st.button("Process PDF"):
-        with st.spinner("Extracting text and building vectors..."):
-            text = extract_text_from_pdf(uploaded_file)
+    uploaded_file = st.file_uploader("Upload Document (PDF, TXT, DOCX, MD)", type=["pdf", "txt", "docx", "md"])
+    if uploaded_file and st.button("Process Document"):
+        with st.spinner("Extracting text & building vectors..."):
+            text = extract_text_from_file(uploaded_file, uploaded_file.name)
             num_chunks = st.session_state.vector_store.add_text(text, source_name=uploaded_file.name)
             st.session_state.indexed_sources.append(f"📄 {uploaded_file.name} ({num_chunks} chunks)")
             st.success(f"Successfully processed {uploaded_file.name}!")
 
 with col2:
-    gdrive_link = st.text_input("Or enter a Google Drive Public Link / File ID:")
-    if gdrive_link and st.button("Download & Process GDrive Doc"):
-        with st.spinner("Downloading from GDrive & indexing..."):
+    gdrive_link = st.text_input("Or enter Google Drive / Docs / Slides Link:")
+    if gdrive_link and st.button("Download & Process GDrive Link"):
+        with st.spinner("Downloading from Google Drive & indexing..."):
             try:
                 text = download_and_extract_gdrive(gdrive_link)
-                num_chunks = st.session_state.vector_store.add_text(text, source_name="GDrive_Doc.pdf")
-                st.session_state.indexed_sources.append(f"☁️ Google Drive Doc ({num_chunks} chunks)")
-                st.success("Successfully processed Google Drive document!")
+                num_chunks = st.session_state.vector_store.add_text(text, source_name="GDrive_Doc")
+                st.session_state.indexed_sources.append(f"☁️ Google Drive File ({num_chunks} chunks)")
+                st.success("Successfully processed Google Drive file!")
             except Exception as e:
                 st.error(f"Error processing GDrive link: {e}")
 
-# Display Active Sources in Sidebar
+# Sidebar Status
 with st.sidebar:
     if st.session_state.indexed_sources:
         for src in st.session_state.indexed_sources:
@@ -173,37 +214,29 @@ with st.sidebar:
 
 st.divider()
 
-# UI Layout: RAG Query Engine
+# UI Layout: Query
 st.subheader("2. Ask Questions")
-user_query = st.text_input("Enter your question based on the ingested documents:")
+user_query = st.text_input("Enter your question:")
 
 if st.button("Search & Answer", type="primary"):
     if not groq_api_key:
-        st.error("Please enter a valid Groq API Key in the sidebar or setup Streamlit Secrets.")
+        st.error("Please provide a Groq API key.")
     elif st.session_state.vector_store.index.ntotal == 0:
-        st.warning("Please upload and process at least one document before asking questions.")
+        st.warning("Please index at least one document first.")
     elif not user_query.strip():
-        st.warning("Please enter a question.")
+        st.warning("Please enter a valid question.")
     else:
-        with st.spinner("Searching vectors, reranking, and querying Groq..."):
-            # 1. Similarity Search
+        with st.spinner("Searching, Reranking & Fetching Answer from Groq..."):
             candidates = st.session_state.vector_store.similarity_search(user_query, k=10)
-            
-            # 2. Rerank Chunks
             reranked_chunks = rerank_chunks(user_query, candidates, top_n=3)
             
-            # 3. Construct Context
             context_str = ""
             for idx, c in enumerate(reranked_chunks, 1):
                 context_str += f"\n[Document {idx} | Source: {c['metadata']['source']} | Tokens: {c['metadata']['token_count']}]\n{c['text']}\n"
             
-            # 4. Query Groq Model
             client = Groq(api_key=groq_api_key)
-            system_prompt = (
-                "You are a helpful assistant. Use ONLY the provided context to answer the user's question. "
-                "If the context does not contain enough information, state that you do not know."
-            )
-            user_prompt = f"Context Information:\n{context_str}\n\nQuestion: {user_query}\nAnswer:"
+            system_prompt = "You are a helpful assistant. Use ONLY the provided context to answer the question."
+            user_prompt = f"Context:\n{context_str}\n\nQuestion: {user_query}\nAnswer:"
             
             try:
                 response = client.chat.completions.create(
@@ -215,17 +248,14 @@ if st.button("Search & Answer", type="primary"):
                     temperature=0.1
                 )
                 
-                # Render Response
                 st.markdown("### Answer")
                 st.write(response.choices[0].message.content)
                 
-                # Render Source Chunks Used
-                with st.expander("🔍 View Top Reranked Context Chunks"):
+                with st.expander("🔍 View Top Reranked Chunks"):
                     for i, chunk in enumerate(reranked_chunks, 1):
                         st.markdown(f"**Chunk {i}** | Source: `{chunk['metadata']['source']}` | Tokens: `{chunk['metadata']['token_count']}`")
                         st.text(chunk["text"])
                         st.divider()
-                        
             except Exception as e:
                 st.error(f"Groq API Error: {e}")
-                 
+            
