@@ -3,6 +3,8 @@ groq
 sentence-transformers
 faiss-cpu
 pypdf
+python-docx
+requests
 gdown
 langchain-text-splitters
 torch
